@@ -1,0 +1,4 @@
+[submodule "DragonOS"]
+	path = DragonOS
+	url = https://github.com/DragonOS-Community/DragonOS.git
+	branch = 597315b04d2e64d937f56a11416c56cd041da703
