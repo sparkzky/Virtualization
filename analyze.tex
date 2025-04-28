@@ -1,0 +1,159 @@
+% !TeX program = xelatex
+\documentclass{mancls}
+\usepackage{fontspec}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning}
+
+\title{DragonOS虚拟化子系统 v0.1.10 分析报告}
+\makeindex
+
+\begin{document}
+
+\section{项目介绍}
+\subsection{背景与目标}
+DragonOS 虚拟化子系统旨在为云计算和服务器场景提供高效的硬件虚拟化支持，基于 x86\_64 架构实现完整的 KVM（Kernel-based Virtual Machine）集成。其核心目标包括：
+\begin{itemize}
+    \item 支持硬件辅助虚拟化技术（Intel VT-x/AMD-V），提供接近原生性能的虚拟机运行环境
+    \item 实现轻量化、模块化的虚拟化管理框架，便于扩展至其他架构
+    \item 提供安全的用户态 API 接口，支持虚拟机生命周期管理
+    \item 优化内存虚拟化和 I/O 虚拟化性能，满足数据中心级需求
+\end{itemize}
+
+\subsection{总体架构}
+虚拟化子系统采用分层设计，主要组件包括：
+\begin{itemize}
+    \item \textbf{硬件抽象层}：处理 CPU 特性检测（CPUID）、VMX 操作、EPT 页表等底层硬件交互
+    \item \textbf{虚拟机监控器（VMM）}：通过 KVM 接口实现虚拟机上下文管理、事件处理和资源调度
+    \item \textbf{内存管理单元（MMU）}：支持嵌套分页（NPT/EPT）和内存虚拟化优化
+    \item \textbf{设备虚拟化框架}：提供 Lapic、I/O APIC 等关键设备的仿真
+    \item \textbf{用户态接口}：通过 ioctl 和 sysfs 实现用户空间控制平面
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1.5cm]
+    \node (hw) [rectangle, draw, text width=3cm, align=center] {硬件层\\ (VT-x/EPT/MTRR)};
+    \node (hal) [rectangle, draw, below=of hw, text width=3cm, align=center] {硬件抽象层\\ (asm/cpuid/mtrr)};
+    \node (vmm) [rectangle, draw, below=of hal, text width=3cm, align=center] {虚拟机监控器\\ (kvm\_host/vcpu)};
+    \node (mmu) [rectangle, draw, right=of vmm, text width=3cm, align=center] {内存管理\\ (mmu/kvm\_mmu)};
+    \node (api) [rectangle, draw, below=of vmm, text width=3cm, align=center] {用户态接口\\ (user\_api/kvm\_dev)};
+    
+    \draw [->] (hw) -- (hal);
+    \draw [->] (hal) -- (vmm);
+    \draw [->] (vmm) -- (api);
+    \draw [->] (vmm) -- (mmu);
+    \draw [->] (mmu) -- (hal);
+\end{tikzpicture}
+\caption{虚拟化子系统架构图}
+\end{figure}
+
+\section{x86\_64架构实现}
+\subsection{CPU虚拟化}
+通过 Intel VMX 扩展实现硬件辅助虚拟化：
+\begin{itemize}
+    \item \texttt{vmx/} 目录包含 VMX 操作核心逻辑：
+    \begin{itemize}
+        \item \texttt{capabilities.rs}: 检测 VMX 支持特性（Unrestricted Guest, APICv）
+        \item \texttt{exit.rs}: 处理 VM Exit 事件（EPT Violation, I/O 指令拦截）
+        \item \texttt{vmenter.S}: 汇编实现的 VMLAUNCH/VMRESUME 指令封装
+    \end{itemize}
+    \item \texttt{vcpu.rs} 实现虚拟 CPU 上下文管理：
+\end{itemize}
+
+\subsection{内存虚拟化}
+采用扩展页表（EPT）实现二级地址转换：
+\begin{itemize}
+    \item \texttt{mmu/} 模块实现嵌套分页管理：
+    \begin{itemize}
+        \item \texttt{kvm\_mmu.rs}: EPT 页表构建与 GPA→HVA 转换
+        \item 支持大页（2M/1G）映射和 MTRR 类型缓存优化
+    \end{itemize}
+    \item 内存虚拟化关键流程：
+    \begin{enumerate}
+        \item 用户态申请内存区域（\texttt{kvm\_host/mem.rs}）
+        \item 内核建立 EPT 映射（\texttt{mmu\_internal.rs}）
+        \item 处理 EPT Violation 异常（\texttt{exit.rs}）
+    \end{enumerate}
+\end{itemize}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=1cm]
+    \node (gva) [ellipse, draw] {Guest VA};
+    \node (gpt) [rectangle, draw, below=of gva] {客户页表 (CR3)};
+    \node (gpa) [ellipse, draw, below=of gpt] {GPA};
+    \node (ept) [rectangle, draw, below=of gpa] {EPT 页表};
+    \node (hpa) [ellipse, draw, below=of ept] {HPA};
+    
+    \draw [->] (gva) -- node[right] {客户MMU} (gpt);
+    \draw [->] (gpt) -- (gpa);
+    \draw [->] (gpa) -- node[right] {EPT 转换} (ept);
+    \draw [->] (ept) -- (hpa);
+\end{tikzpicture}
+\caption{EPT 地址转换流程}
+\end{figure}
+
+\subsection{中断虚拟化}
+\begin{itemize}
+    \item \texttt{lapic.rs} 实现虚拟本地 APIC：
+    \begin{itemize}
+        \item 支持中断优先级和虚拟中断注入
+        \item 集成 APICv 硬件加速特性
+    \end{itemize}
+    \item 中断处理流程：
+    \begin{enumerate}
+        \item 虚拟机触发中断（通过 \texttt{lapic\_msr\_write}）
+        \item VMM 注入虚拟中断（\texttt{vcpu.queue\_irq()}）
+        \item VM Entry 时加载中断信息
+    \end{enumerate}
+\end{itemize}
+
+\section{通用虚拟化实现}
+\subsection{KVM 设备模型}
+\begin{itemize}
+    \item \texttt{kvm\_dev.rs} 实现字符设备接口：
+
+    \item 支持标准 KVM IOCTL 命令集（创建 VM/VCPU、内存区域注册）
+\end{itemize}
+
+\subsection{用户态接口}
+通过 \texttt{user\_api.rs} 提供系统调用封装：
+\begin{itemize}
+    \item 虚拟机创建：\texttt{kvm\_create\_vm(fd, flags)}
+    \item VCPU 管理：\texttt{kvm\_create\_vcpu(vm\_fd, vcpu\_id)}
+    \item 内存管理：\texttt{kvm\_set\_user\_memory\_region(...)}
+\end{itemize}
+
+\section{关键技术特性}
+\subsection{性能优化}
+\begin{itemize}
+    \item \textbf{EPT 大页支持}：通过 \texttt{mtrr.rs} 检测内存类型，优先使用 1G 大页减少 TLB 缺失
+    \item \textbf{直接中断注入}：利用 APICv 硬件特性绕过 VMM 处理
+    \item \textbf{VMCS 缓存}：在 \texttt{vmcs/feat.rs} 中启用 VPID 避免 TLB 刷新
+\end{itemize}
+
+\subsection{安全机制}
+\begin{itemize}
+    \item \textbf{权限隔离}：用户态虚拟机仅能访问已注册的内存区域
+    \item \textbf{指令过滤}：在 \texttt{exit.rs} 中严格校验敏感指令（LGDT/CPUID）
+    \item \textbf{地址空间随机化}：虚拟机内存布局随机化（通过 \texttt{mem.rs} 实现）
+\end{itemize}
+
+\section{现状与规划}
+\subsection{已实现功能}
+\begin{itemize}
+    \item 基础 VM/VCPU 生命周期管理
+    \item EPT 内存虚拟化与中断虚拟化
+    \item KVM 兼容性接口（支持 QEMU/KVM 工具链）
+\end{itemize}
+
+\subsection{未来方向}
+\begin{itemize}
+    \item 支持 AMD SVM 虚拟化扩展
+    \item 实现 Virtio 设备标准化接口
+    \item 增加热迁移（Live Migration）支持
+    \item 优化嵌套虚拟化性能
+\end{itemize}
+
+\end{document}
